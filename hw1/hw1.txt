@@ -1,4 +1,4 @@
-CSE508: Network Security, Spring 2021
+  CSE508: Network Security, Spring 2021
 
 Homework 1: Passive Network Monitoring
 -------------------------------------------------------------------------------
@@ -53,7 +53,7 @@ other tools you might want (although the above are more than enough).
  
  1.8 How many TCP packets have the SYN flag set?
 
- 1.9 How many TCP connection attempts were made?
+ 1.9 How many TCP connection attempts were made
  
 1.10 Towards which ports were TCP connection attempts made? How many attempts
      per port?
