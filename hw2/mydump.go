@@ -29,7 +29,7 @@ func read(deviceInterface, filePath string) (handle *pcap.Handle, err error) {
 		if deviceInterface == "" { // interface is not specified, set as default device interface
 			ifs, _ := pcap.FindAllDevs()
 			deviceInterface = ifs[0].Name
-			fmt.Printf("set default interface as %s\n", deviceInterface)
+			// fmt.Printf("set default interface as %s\n", deviceInterface)
 		}
 		return pcap.OpenLive(deviceInterface, int32(65535), true, pcap.BlockForever)
 	}
@@ -145,7 +145,7 @@ func main() {
 	}
 	flag.Parse()
 	bpfFilterArr = flag.Args()
-	fmt.Println(deviceInterface, filePath, keyword, strings.Join(bpfFilterArr, " "))
+	// fmt.Println(deviceInterface, filePath, keyword, strings.Join(bpfFilterArr, " "))
 
 	// read from a pcap file, or capture live packets
 	handle, err := read(deviceInterface, filePath)
