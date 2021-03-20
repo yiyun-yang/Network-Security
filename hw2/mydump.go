@@ -95,7 +95,6 @@ func processPackets(pktSource gopacket.PacketSource, keyword string) {
 		if len(eth.Payload) > 0 {
 			fmt.Println(hex.Dump(eth.Payload))
 		}
-		return
 	}
 
 }
@@ -146,7 +145,7 @@ func main() {
 	}
 	flag.Parse()
 	bpfFilterArr = flag.Args()
-	fmt.Println(deviceInterface, filePath, keyword, bpfFilterArr)
+	fmt.Println(deviceInterface, filePath, keyword, strings.Join(bpfFilterArr, " "))
 
 	// read from a pcap file, or capture live packets
 	handle, err := read(deviceInterface, filePath)
@@ -158,7 +157,7 @@ func main() {
 	}
 
 	// set BPF filter if specified
-	if flag.NArg() == 0 {
+	if flag.NArg() != 0 {
 		if err := handle.SetBPFFilter(strings.Join(bpfFilterArr, " ")); err != nil {
 			panic(err)
 		}
