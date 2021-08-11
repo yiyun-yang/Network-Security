@@ -6,7 +6,7 @@
 
 // The pcaplay binary load an offline capture (pcap file) and replay
 // it on the select interface, with an emphasis on packet timing
-package main
+package poison
 
 import (
 	"flag"
@@ -30,7 +30,7 @@ var (
 	decoder       *gopacket.DecodingLayerParser
 	decodedLayers []gopacket.LayerType
 	serialOpts    gopacket.SerializeOptions
-	buf           gopacket.SerializeBuffer
+	serialBuf     gopacket.SerializeBuffer
 
 	ethLayer  layers.Ethernet
 	ipv4Layer layers.IPv4
@@ -63,7 +63,7 @@ func main() {
 			continue
 		}
 
-		handlePackets()
+		handlePackets(handle)
 	}
 
 }
@@ -137,14 +137,14 @@ func readMapping(filename string) map[string]string {
 func setupDecoder() {
 	decoder = gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &ethLayer, &ipv4Layer, &udpLayer, &dnsLayer)
 	decodedLayers = make([]gopacket.LayerType, 0, 4)
-	buf = gopacket.NewSerializeBuffer()
+	serialBuf = gopacket.NewSerializeBuffer()
 	serialOpts = gopacket.SerializeOptions{
 		FixLengths:       true,
 		ComputeChecksums: true,
 	}
 }
 
-func handlePackets() {
+func handlePackets(handle *pcap.Handle) {
 	fmt.Println("========== Packet captured! ==========")
 	fmt.Printf("DNS questions: total %v\n", dnsLayer.QDCount)
 	var i uint16
@@ -182,9 +182,9 @@ func handlePackets() {
 	swapSrcDst()
 	// serialize packets
 	_ = udpLayer.SetNetworkLayerForChecksum(&ipv4Layer)
-	_ = gopacket.SerializeLayers(buf, serialOpts, &ethLayer, &ipv4Layer, &udpLayer, &dnsLayer)
+	_ = gopacket.SerializeLayers(serialBuf, serialOpts, &ethLayer, &ipv4Layer, &udpLayer, &dnsLayer)
 	// write packet
-	err = handle.WritePacketData(buf.Bytes())
+	err := handle.WritePacketData(serialBuf.Bytes())
 	if err != nil {
 		panic(err)
 	}
