@@ -1,4 +1,4 @@
-package detect
+package main
 
 import (
 	"flag"
@@ -16,8 +16,7 @@ var (
 	traceFile string
 	bpfFilter string
 
-	txidQueue = make(chan uint16, 100)   // help maintain limited amount of keys in map, to avoid infinitely enlarging
-	respMap   = make(map[uint16]DNSInfo) // key: DNS transaction id
+	respMap = make(map[uint16]DNSInfo) // key: DNS transaction id
 )
 
 type DNSInfo struct {
@@ -79,18 +78,19 @@ func detect(handle *pcap.Handle) {
 		var packet gopacket.Packet
 		select {
 		case packet = <-in:
-			dnsLayer := packet.Layer(layers.LayerTypeDNS)
-			if dnsLayer == nil {
+			if packet == nil {
+				return
+			}
+			if packet.ApplicationLayer() == nil || packet.ApplicationLayer().LayerType() != layers.LayerTypeDNS {
 				continue
 			}
-			dns := dnsLayer.(*layers.DNS)
+			dns := packet.ApplicationLayer().(*layers.DNS)
 			if !dns.QR { // we only care about QR=1(response) packets
-				continue
+				break
 			}
 
 			txid := dns.ID
-			cleanMap(txid)
-			dnsInfo := buildDNSInfo(txid, packet.Metadata().Timestamp, *dns)
+			dnsInfo := buildDNSInfo(txid, packet.Metadata().Timestamp, *dns, string(dns.Questions[0].Name))
 			if original, ok := respMap[txid]; ok { // txid already exists in response map
 				printAlert(original, dnsInfo)
 			} else {
@@ -100,32 +100,17 @@ func detect(handle *pcap.Handle) {
 	}
 }
 
-// maintain limited amount of keys in map
-func cleanMap(txid uint16) {
-	for {
-		select {
-		case txidQueue <- txid:
-			break // Put txid in the queue unless it is full
-		default:
-			{
-				fmt.Println("Channel full. Discarding the oldest key in map")
-				delete(respMap, <-txidQueue)
-			}
-		}
-	}
-}
-
-func buildDNSInfo(txid uint16, pktTime time.Time, dns layers.DNS) DNSInfo {
+func buildDNSInfo(txid uint16, pktTime time.Time, dns layers.DNS, name string) DNSInfo {
 	nameIpMap := make(map[string][]string)
 	for _, ans := range dns.Answers {
 		if ans.Type != layers.DNSTypeA || ans.Class != layers.DNSClassIN {
 			continue
 		}
-		domainName := string(ans.Name)
-		if ipList, ok := nameIpMap[domainName]; ok {
+		if ipList, ok := nameIpMap[name]; ok {
 			ipList = append(ipList, ans.IP.String())
+			nameIpMap[name] = ipList
 		} else {
-			nameIpMap[domainName] = []string{}
+			nameIpMap[name] = []string{ans.IP.String()}
 		}
 	}
 	return DNSInfo{txid: txid, pktTime: pktTime, nameIpMap: nameIpMap}
@@ -139,10 +124,12 @@ func buildDNSInfo(txid uint16, pktTime time.Time, dns layers.DNS) DNSInfo {
 func printAlert(info1 DNSInfo, info2 DNSInfo) {
 	for name, ipList1 := range info1.nameIpMap {
 		if ipList2, ok := info2.nameIpMap[name]; ok {
-			fmt.Println(fmt.Sprintf("%v DNS POISONING ATTEMPT", info2.pktTime)) // TODO: time format
-			fmt.Println(fmt.Sprintf("TXID: %v Request %v", info1.txid, name))
-			fmt.Println(fmt.Sprintf("ANSWER 1: [%s]", ipList1))
-			fmt.Println(fmt.Sprintf("ANSWER 2: [%s]", ipList2))
+			if ipList1[0] != ipList2[0] {
+				fmt.Println(fmt.Sprintf("%v DNS POISONING ATTEMPT", info2.pktTime))
+				fmt.Println(fmt.Sprintf("TXID: %v Request %v", info1.txid, name))
+				fmt.Println(fmt.Sprintf("ANSWER 1: [%s]", ipList1))
+				fmt.Println(fmt.Sprintf("ANSWER 2: [%s]", ipList2))
+			}
 		}
 	}
 }

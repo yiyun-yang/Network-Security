@@ -1,0 +1,90 @@
+1. dnspoison.go
+
+1.1 Details of some functions:
+- parseCmd():
+    - If interface is not specified, scan device's interfaces to pick one as default(usually eth0).
+    - If expression is not provided, set "udp port 53" as default bfp filter.
+- setupDecoder():
+    - To decode eth, ip(ipv4), udp, dns layers from packet data.
+    - Use fast decoding with DecodingLayerParser in order to win the race, which takes about 10% of the time as
+    NewPacket, according to https://pkg.go.dev/github.com/google/gopacket#hdr-Fast_Decoding_With_DecodingLayerParser.
+- handlePackets(handle *pcap.Handle):
+    - Only handle packet whose QR = 0, i.e. DNS query.
+    - Modify the DNS query packets(with type A and class IN)directly by attaching forged answers and update ANCount.
+    - If host file is provided but queried name is not in the file, ignore.
+    - Swap src/dst info in each layer.
+    - Set checksum.
+    - Write this modified packet.
+
+1.2 Testing steps on macOS:
+- Start a web server in my local laptop by command:
+    sudo apachectl start.
+- Clean DNS cache by command:
+    sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+- Edit hostname.conf:
+    127.0.0.1 foo.example.com
+    127.0.0.1 bar.example.com
+    127.0.0.1 www.cs.stonybrook.edu
+- Run the program:
+    go run dnspoison.go -f hostname.conf
+
+1.3 Results:
+- Targeted website was poisoned to become my local apache web server.
+- Standard output:
+    forged: type A, [www.cs.stonybrook.edu] -> [127.0.0.1]
+    DNS answer total: 1
+    IP: src 192.168.1.1, dst 192.168.1.22
+    UDP port: src 53(domain), dst 19514
+    Response sent
+- Pcap files:
+    - poison_0.pcap: with [-f hostnames] specified
+    - poison_1.pcap: [-f hostnames] not provided
+
+
+2. dnsdetect.go
+
+2.1 Strategy:
+- Declare a map `respMap`: txid(trasanction id) -> `DNSInfo`(a struct)..
+- Capture DNS response packets only, if this txid is not met before, put this key and DNS info into map.
+- When a duplicate txid is encountered, print the alarm.
+
+2.2 Results of dnsdetect:
+- Run the program: go run dnspoison.go -r poison.pcap
+- Standard output from poison_0.pcap:
+    2021-08-30 22:42:35.768078 -0400 EDT DNS POISONING ATTEMPT
+    TXID: 43432 Request www.cs.stonybrook.edu
+    ANSWER 1: [[127.0.0.1]]
+    ANSWER 2: [[23.185.0.2]]
+- Standard output from poison_1.pcap:
+    2021-08-30 23:09:29.643896 -0400 EDT DNS POISONING ATTEMPT
+    TXID: 13780 Request gateway.fe.apple-dns.net
+    ANSWER 1: [[192.168.1.22]]
+    ANSWER 2: [[17.248.175.183 17.248.175.178 17.248.175.245 17.248.175.174 17.248.175.202 17.248.175.243 17.248.175.208 17.248.175.234]]
+    2021-08-30 23:09:30.711237 -0400 EDT DNS POISONING ATTEMPT
+    TXID: 54629 Request clients4.google.com
+    ANSWER 1: [[192.168.1.22]]
+    ANSWER 2: [[142.250.72.110]]
+    2021-08-30 23:09:32.730563 -0400 EDT DNS POISONING ATTEMPT
+    TXID: 4814 Request www.google.com
+    ANSWER 1: [[192.168.1.22]]
+    ANSWER 2: [[142.250.65.196]]
+    2021-08-30 23:09:33.666468 -0400 EDT DNS POISONING ATTEMPT
+    TXID: 55842 Request www.gstatic.com
+    ANSWER 1: [[192.168.1.22]]
+    ANSWER 2: [[142.250.80.99]]
+    2021-08-30 23:09:36.198505 -0400 EDT DNS POISONING ATTEMPT
+    TXID: 61721 Request safebrowsing.google.com
+    ANSWER 1: [[192.168.1.22]]
+    ANSWER 2: [[142.251.35.174]]
+    2021-08-30 23:09:36.205484 -0400 EDT DNS POISONING ATTEMPT
+    TXID: 9835 Request www.cs.stonybrook.edu
+    ANSWER 1: [[192.168.1.22]]
+    ANSWER 2: [[23.185.0.2]]
+    2021-08-30 23:09:36.711671 -0400 EDT DNS POISONING ATTEMPT
+    TXID: 8108 Request cdn.optimizely.com
+    ANSWER 1: [[192.168.1.22]]
+    ANSWER 2: [[23.60.0.151]]
+
+
+
+

