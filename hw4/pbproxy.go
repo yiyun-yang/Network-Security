@@ -1,16 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha1"
 	"flag"
-	"fmt"
 	"golang.org/x/crypto/pbkdf2"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -19,113 +18,102 @@ import (
 
 func Client(addr string, passPhrase []byte) {
 	conn, err := net.Dial("tcp", addr)
+	log.Printf("[CLIENT] org: %s\n", conn.LocalAddr().String())
+	log.Printf("[CLIENT] dst: %s\n", conn.RemoteAddr().String())
 	if err != nil {
-		fmt.Print(err)
+		log.Println(err)
 		return
 	}
 	defer conn.Close()
-	// use goroutine to read user input and send data in non-blocking way
 	go func() {
-		buf := make([]byte, 4096)
 		for {
-			n1, err := os.Stdin.Read(buf)
-			if err != nil {
-				fmt.Print(err)
+			buf := make([]byte, 4096)
+			n, err := conn.Read(buf)
+			if err == io.EOF {
 				continue
 			}
-			// combine user input, nonce and salt together
-			msg := generateMsg(buf[:n1], passPhrase)
-			n2, err := conn.Write(msg)
-			fmt.Print(n1, n2, "send: %d, recv %d")
+			log.Printf("[CLIENT] receive: %d\n", n)
+			recv := buf[:n]
+			log.Printf("[CLIENT] received(encrypted): %v", recv)
+			// decrypt response
+			//msg, err := extractMsg(recv, passPhrase)
+			msg := recv // TODO: testOnly
 			if err != nil {
-				fmt.Print(err)
-				continue
+				log.Println(err)
 			}
+			log.Printf("[CLIENT] received(decrypted): %v", string(msg))
 		}
 	}()
-	// read response sequentially
-	buf := make([]byte, 4096)
-	for {
-		n, err := conn.Read(buf)
-		if err == io.EOF {
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		msg := scanner.Bytes()
+		msg = append(msg, '\n')
+		// combine user input, nonce and salt together
+		// msg := generateMsg(buf[:n1], passPhrase)		// TODO: testOnly
+		//if len(msg) == 0 {
+		//	continue
+		//}
+		_, err := conn.Write(msg)
+		//log.Printf("[CLIENT] input: %d, relay(Encrypted) %d\n", n1, n2)
+		log.Printf("[CLIENT] input: %s\n", string(msg))
+
+		if err != nil {
+			log.Println(err)
 			continue
 		}
-		recv := buf[:n]
-		fmt.Print(string(recv))
-		// decrypt response
-		msg, err := extractMsg(recv, passPhrase)
-		if err != nil {
-			fmt.Print(err)
-		}
-		fmt.Println(msg)
 	}
 }
 
-// eg. listenAddr: :2222
-func ServerProxy(listenAddr string, addr string, passPhrase []byte) {
-	listener, err := net.Listen("tcp", listenAddr)
+func ReverseProxy(listenPort string, forwardAddr string, passPhrase []byte) {
+	listener, err := net.Listen("tcp", listenPort)
 	if err != nil {
-		log.Fatal("tcp server listener error:", err)
+		log.Fatal("[SERVER] tcp server listener error:", err)
 	}
 	for {
 		// accept new connection
-		conn, err := listener.Accept()
-		if err != nil {
-			log.Fatal("tcp server accept error", err)
-		}
-		// start a new goroutine: handle multiple concurrent connections in non-blocking way
-		go HandleConnection(addr, conn, passPhrase)
-	}
-}
+		listenConn, _ := listener.Accept()
+		target, _ := net.Dial("tcp", forwardAddr)
+		log.Printf("[SERVER] accepted: %s\n", listenConn.RemoteAddr().String())
+		log.Printf("[SERVER] org: %s\n", target.LocalAddr().String())
+		log.Printf("[SERVER] dst: %s\n", target.RemoteAddr().String())
 
-func HandleConnection(addr string, conn net.Conn, passPhrase []byte) {
-	fmt.Print(conn.RemoteAddr().String(), "client connected: %s")
-	target, err := net.Dial("tcp", addr)
-	defer conn.Close()
-	if err != nil {
-		fmt.Print(err)
-		// conn.Close()
-	} else {
+		defer listenConn.Close()
 		defer target.Close()
-		fmt.Print(target.LocalAddr().String(), "target connected: %s")
-		// closed := make(chan bool, 2)
-		go Proxy(conn, target, true, passPhrase)  // decode client data and relay to the dst addr
-		go Proxy(target, conn, false, passPhrase) // encrypt response and return to the client
-		// <-closed
-		// fmt.Print(conn.RemoteAddr().String(), "connection closed: %s")
+
+		go SocketServer(listenConn, target, true, passPhrase)  // decode data and relay to the dst addr
+		go SocketServer(target, listenConn, false, passPhrase) // encrypt response and return
+		//go io.Copy(target, listenConn)
+		//go io.Copy(listenConn, target)
 	}
 }
 
-// func Proxy(from net.Conn, to net.Conn, closed chan bool, out bool, passPhrase []byte) {
-func Proxy(from net.Conn, to net.Conn, out bool, passPhrase []byte) {
-	buffer := make([]byte, 4096)
+func SocketServer(from net.Conn, to net.Conn, outbound bool, passPhrase []byte) {
 	for {
+		buffer := make([]byte, 4096)
 		n1, err := from.Read(buffer)
 		if err != nil {
-			//closed <- true
-			//return
-			continue
+			log.Println(err)
+			return
 		}
+		log.Printf("[SERVER] recv %d from: %s\n", n1, from.RemoteAddr().String())
 		var recv = buffer[:n1]
 		var msg []byte
-		if out {
-			msg, err = extractMsg(recv, passPhrase) // decrypt client messages
-			// TODO: verify if it works
-			if err != nil {
-				fmt.Print(err)
-				fmt.Println("Verification failed")
-				continue
-			}
-		} else {
-			msg = generateMsg(recv, passPhrase) // encrypt responses from dst addr
-		}
+		//if outbound {
+		//	msg, err = extractMsg(recv, passPhrase) // decrypt messages
+		//	if err != nil {
+		//		log.Println(err)
+		//		log.Println("[SERVER] Verification failed, turn to garbage.")
+		//		continue
+		//	}
+		//} else {
+		//	msg = generateMsg(recv, passPhrase) // encrypt responses from dst addr
+		//}
+		msg = recv // TODO: testOnly
 		n2, err := to.Write(msg)
-		fmt.Print(from.RemoteAddr().String(), n1, to.RemoteAddr().String(), n2, "from: %s, recv %d. to: %s, send: %d")
+		log.Printf("[SERVER] write: %d to: %s\n", n2, to.RemoteAddr().String())
 		if err != nil {
-			fmt.Print(err)
-			//closed <- true
-			//return
-			continue
+			log.Println(err)
+			return
 		}
 	}
 }
@@ -157,8 +145,8 @@ func Encrypt(plainText []byte, passphrase []byte, nonce []byte, salt []byte) []b
 	}
 
 	ciphertext := aesgcm.Seal(nil, nonce, plainText, nil)
-	fmt.Printf("Key: %s\n", key)
-	fmt.Printf("Ciphertext: %s\n", ciphertext)
+	log.Printf("Key: %s\n", key) // TODO: SERVER or CLIENT
+	log.Printf("Ciphertext: %s\n", ciphertext)
 	return ciphertext
 }
 
@@ -176,10 +164,10 @@ func Decrypt(cipherText []byte, passphrase []byte, nonce []byte, salt []byte) ([
 
 	plainText, err := aesgcm.Open(nil, nonce, cipherText, nil)
 	if err != nil {
-		fmt.Printf("Decrypt error: %s", err.Error())
+		log.Printf("Decrypt error: %s\n", err.Error()) // TODO: SERVER or CLIENT
 		return nil, err
 	}
-	fmt.Printf("plainText: %s\n", plainText)
+	log.Printf("plainText: %s\n", plainText)
 	return plainText, nil
 }
 
@@ -205,6 +193,8 @@ func BytesCombine(pBytes ...[]byte) []byte {
 	return bytes.Join(pBytes, []byte(""))
 }
 
+// TODO: unit test of Encrypt and Decrypt
+
 func main() {
 	// Parsing command lines: eg. pbproxy -p mykey -l 2222 localhost 22
 	var keyPath string
@@ -215,10 +205,11 @@ func main() {
 	flag.Parse()
 	addrArr = flag.Args()
 	var addr = strings.Join(addrArr, ":")
-	passPhrase, _ := ioutil.ReadFile(keyPath)
+	//passPhrase, _ := ioutil.ReadFile(keyPath)
+	passPhrase := []byte{} // TODO: testOnly
 
 	if listenPort != "" {
-		ServerProxy(":"+listenPort, addr, passPhrase)
+		ReverseProxy(":"+listenPort, addr, passPhrase)
 	} else {
 		Client(addr, passPhrase)
 	}
