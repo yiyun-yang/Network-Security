@@ -2,14 +2,9 @@ package main
 
 import (
 	"bufio"
-	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/sha1"
 	"flag"
-	"golang.org/x/crypto/pbkdf2"
 	"io"
+	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -82,8 +77,6 @@ func ReverseProxy(listenPort string, forwardAddr string, passPhrase []byte) {
 
 		go SocketServer(listenConn, target, true, passPhrase)  // decode data and relay to the dst addr
 		go SocketServer(target, listenConn, false, passPhrase) // encrypt response and return
-		//go io.Copy(target, listenConn)
-		//go io.Copy(listenConn, target)
 	}
 }
 
@@ -118,83 +111,6 @@ func SocketServer(from net.Conn, to net.Conn, outbound bool, passPhrase []byte) 
 	}
 }
 
-func generateMsg(plainText []byte, passphrase []byte) []byte {
-	nonce, salt := GenerateNonceAndSalt()
-	cypherText := Encrypt(plainText, passphrase, nonce, salt)
-	return BytesCombine(nonce, salt, cypherText)
-}
-
-func extractMsg(recvMsg []byte, passphrase []byte) ([]byte, error) {
-	nonce, salt, cypherText := recvMsg[:12], recvMsg[12:20], recvMsg[20:]
-	plainText, err := Decrypt(cypherText, passphrase, nonce, salt)
-	return plainText, err
-}
-
-// Using AES-256 in GCM mode
-func Encrypt(plainText []byte, passphrase []byte, nonce []byte, salt []byte) []byte {
-	key := GenerateKey(passphrase, salt)
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	aesgcm, err := cipher.NewGCM(block)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	ciphertext := aesgcm.Seal(nil, nonce, plainText, nil)
-	log.Printf("Key: %s\n", key) // TODO: SERVER or CLIENT
-	log.Printf("Ciphertext: %s\n", ciphertext)
-	return ciphertext
-}
-
-func Decrypt(cipherText []byte, passphrase []byte, nonce []byte, salt []byte) ([]byte, error) {
-	key := GenerateKey(passphrase, salt)
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	aesgcm, err := cipher.NewGCM(block)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	plainText, err := aesgcm.Open(nil, nonce, cipherText, nil)
-	if err != nil {
-		log.Printf("Decrypt error: %s\n", err.Error()) // TODO: SERVER or CLIENT
-		return nil, err
-	}
-	log.Printf("plainText: %s\n", plainText)
-	return plainText, nil
-}
-
-// AES key was derived from the supplied passphrase using PBKDF2
-func GenerateKey(passphrase []byte, salt []byte) []byte {
-	// keyLen should be 32 for AES-256
-	return pbkdf2.Key(passphrase, salt, 512, 32, sha1.New)
-}
-
-func GenerateNonceAndSalt() ([]byte, []byte) {
-	nonce := make([]byte, 12)
-	salt := make([]byte, 8)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		panic(err.Error())
-	}
-	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		panic(err.Error())
-	}
-	return nonce, salt
-}
-
-func BytesCombine(pBytes ...[]byte) []byte {
-	return bytes.Join(pBytes, []byte(""))
-}
-
-// TODO: unit test of Encrypt and Decrypt
-
 func main() {
 	// Parsing command lines: eg. pbproxy -p mykey -l 2222 localhost 22
 	var keyPath string
@@ -205,8 +121,8 @@ func main() {
 	flag.Parse()
 	addrArr = flag.Args()
 	var addr = strings.Join(addrArr, ":")
-	//passPhrase, _ := ioutil.ReadFile(keyPath)
-	passPhrase := []byte{} // TODO: testOnly
+	passPhrase, _ := ioutil.ReadFile(keyPath)
+	// passPhrase := []byte{} // TODO: testOnly
 
 	if listenPort != "" {
 		ReverseProxy(":"+listenPort, addr, passPhrase)
