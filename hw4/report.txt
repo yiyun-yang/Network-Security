@@ -1,16 +1,15 @@
-brew install nmap
+Environment: macOS, ncat(instead of nc/netcat, from https://nmap.org/ncat/)
 
-ncat -l -p 2222 -c 'ncat  localhost 22'
-ssh -o "ProxyCommand ncat localhost 2222" localhost
-
-server: go run pbproxy.go -p passphrase.txt -l 2222 localhost 22
-client: go run pbproxy.go -p passphrase.txt localhost 2222
-
-go run pbproxy.go -p passphrase.txt -l 2222 localhost 22
-ssh -o "ProxyCommand go run pbproxy.go -p passphrase.txt localhost 2222" localhost
-ssh -o "ProxyCommand /Users/evenyoung/sdk/go1.16.2/bin/go run pbproxy.go -p passphrase.txt localhost 2222" localhost
-ssh -o "ProxyCommand /Users/evenyoung/sdk/go1.16.2/bin/go run pbproxy.go -p passphrase.txt localhost 2222" -vp 22 localhost
-
-
-alias go='/Users/evenyoung/sdk/go1.16.2/bin/go'
-go env -w GO111MODULE=auto
+Test individually:
+- client:
+    - bi-directional communication with netcat: can send and receive message at both side.
+        - Terminal 1: ncat -l -p 3333
+        - Terminal 2: go run pbproxy.go -p passphrase.txt localhost 3333
+- server:
+    - bi-directional communication with netcat: ssh connect successfully, and can execute any command on Terminal 2.
+        - Terminal 1: go run pbproxy.go -p passphrase.txt -l 3333 localhost 22
+        - Terminal 2: ssh -o "ProxyCommand ncat localhost 3333" localhost
+    - multiple connection to the server: Terminal 2 & 3 can function normally.
+        - Terminal 1: go run pbproxy.go -p passphrase.txt -l 3333 localhost 22
+        - Terminal 2: ssh -o "ProxyCommand ncat localhost 3333" localhost
+        - Terminal 3: (same as the Terminal 2)
