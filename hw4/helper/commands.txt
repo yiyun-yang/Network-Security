@@ -11,6 +11,7 @@ server:
 client:
     ssh -o "ProxyCommand go run pbproxy.go -p passphrase.txt localhost 3333" localhost
     ssh -o "ProxyCommand /Users/evenyoung/sdk/go1.16.2/bin/go run pbproxy.go -p passphrase.txt localhost 3333" localhost
+    ssh -o "ProxyCommand /Users/evenyoung/sdk/go1.16.2/bin/go run pbproxy.go -testmode -p passphrase.txt localhost 3333" localhost
 
 ssh -o "ProxyCommand /Users/evenyoung/sdk/go1.16.2/bin/go run pbproxy.go -p passphrase.txt localhost 3333" -vp 22 localhost
 

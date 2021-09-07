@@ -4,16 +4,19 @@ My implementation:
 1. Client:
 - Start(Dial) a tcp connection to [destination]:[port]
 - Receive and decrypt message:
-    - Start a go routing to read and decrypt message from connection in non-blocking way.
+    - Start a go routing to read message from the connection, decrypt it then write to standard output.
 - Read plaintext traffic from stdin:
-    - Encrypt message before sending.
+    - Encrypt message, then send to the connection.
 
 2. Proxy-server:
-- Listen on tcp port specified by [-l listenport], and wait for the connection.
-- Start(Dial) a tcp connection to [destination]:[port]
-- Relay traffic:
-    - In a go routine, read from accepted connection and decrypt message, then relay it to [destination]:[port]
-    - In a go routine, read from [destination]:[port] and encrypt message, then relay it back to the accepted connection.
+- Listen on tcp port specified by [-l listenport]
+- Wait for the connection in a for-loop.
+- Start(Dial) a tcp connection to [destination]:[port] once a new connection is accepted
+- Relay traffic within the for-loop using go-routine:
+    - Read from accepted connection and decrypt message, then relay it to [destination]:[port]
+    - Read from [destination]:[port] and encrypt message, then relay it back to the accepted connection.
+    - In this way the listener can relay message in a non-blocking way, and can continue to listen for incoming
+      connections, even if the previous session is ended.
 
 3. Message:
 - Generate message:
@@ -30,7 +33,7 @@ My implementation:
     - decrypt: using the extracted nonce, and re-generated AES key to decrypt the cypher message.
 
 
-My test processes():
+My test processes:
 1. Test Encryption and Decryption by running: go test -v. Related file is EncryptDecryption_test.go.
 
 2. Test WITHOUT encryption/decryption individually (specify '-testmode' in command line):
@@ -40,11 +43,21 @@ My test processes():
         - Terminal 2(client): go run pbproxy.go -testmode -p passphrase.txt localhost 3333
 
     2.2 Proxy-server:
-    - Bi-directionally communicate with netcat: ssh successfully, and can deal with multiple commands on Terminal 2.
+    - Bi-directionally communicate with netcat: ssh successfully, Terminal 2 can execute commands normally.
         - Terminal 1(proxy-server): go run pbproxy.go -testmode -p passphrase.txt -l 3333 localhost 22
         - Terminal 2: ssh -o "ProxyCommand nc localhost 3333" localhost
+    - Multiple connections to the proxy-server: Terminal 2 & 3 can perform normally, even if one of them disconnects.
+        - Terminal 1(proxy-server): go run pbproxy.go -p passphrase.txt -l 3333 localhost 22
+        - Terminal 2(client-1): ssh -o "ProxyCommand ncat localhost 3333" localhost
+        - Terminal 3(client-2): ssh -o "ProxyCommand ncat localhost 3333" localhost
 
 3. Integral test:
-- Terminal 1(proxy-server): go run pbproxy.go -p passphrase.txt -l 3333 localhost 22
-- Terminal 2(client): go run pbproxy.go -p passphrase.txt localhost 3333
-However, the result turns out not working as expected.
+3.1. Test WITHOUT encryption/decryption (specify '-testmode' in command line):
+    - Terminal 1(proxy-server): go run pbproxy.go -testmode -p passphrase.txt -l 3333 localhost 22
+    - Terminal 2(client): ssh -o "ProxyCommand go run pbproxy.go -testmode -p passphrase.txt localhost 3333" localhost
+
+3.2 Test with encryption/decryption (the complete test):
+    - Terminal 1(proxy-server): go run pbproxy.go -p passphrase.txt -l 3333 localhost 22
+    - Terminal 2(client-1): ssh -o "ProxyCommand go run pbproxy.go -p passphrase.txt localhost 3333" localhost
+    - Terminal 3(client-2): ssh -o "ProxyCommand go run pbproxy.go -p passphrase.txt localhost 3333" localhost
+    The results appear as the same as expected.

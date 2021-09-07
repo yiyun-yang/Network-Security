@@ -43,10 +43,10 @@ func main() {
 
 func Client(addr string, passPhrase []byte, test bool) {
 	conn, err := net.Dial("tcp", addr)
-	log.Printf("[CLIENT] org: %s\n", conn.LocalAddr().String())
-	log.Printf("[CLIENT] dst: %s\n", conn.RemoteAddr().String())
+	// log.Printf("[CLIENT] org: %s\n", conn.LocalAddr().String())
+	// log.Printf("[CLIENT] dst: %s\n", conn.RemoteAddr().String())
 	if err != nil {
-		log.Println(err)
+		// log.Println(err)
 		return
 	}
 	defer conn.Close()
@@ -62,30 +62,35 @@ func Client(addr string, passPhrase []byte, test bool) {
 			if test {
 				msg = recv
 			} else {
-				log.Printf("[CLIENT][RECEIVE] encrypted message %x, len: %d", recv, n)
+				// log.Printf("[CLIENT][RECEIVE] encrypted message %x, len: %d", recv, n)
 				msg, err = extractMsg(recv, passPhrase) // decrypt response
-				log.Printf("[CLIENT][RECEIVE] decrypted message: %x", msg)
+				// log.Printf("[CLIENT][RECEIVE] decrypted message: %x", msg)
 				if err != nil {
-					log.Println(err)
+					// log.Println(err)
 				}
 			}
-			log.Printf("%s", string(msg))
+			_, err = os.Stdout.Write(msg) // write decrypted message to standard output
+			if err != nil {
+				log.Print("Write error: %s\n", err)
+			}
+			buf = nil
 		}
 	}()
 	reader := bufio.NewReader(os.Stdin)
-	buf := make([]byte, bufferSize)
 	for {
+		buf := make([]byte, bufferSize)
 		n1, _ := reader.Read(buf)
 		if test {
 			conn.Write(buf[:n1])
 		} else {
 			msg := generateMsg(buf[:n1], passPhrase) // Encrypt message
 			_, err := conn.Write(msg)
-			log.Printf("[CLIENT][SEND] encrypted message: %x\n", msg)
+			// log.Printf("[CLIENT][SEND] encrypted message: %x\n", msg)
 			if err != nil {
-				log.Println(err)
+				// log.Println(err)
 			}
 		}
+		buf = nil
 	}
 }
 
@@ -94,31 +99,30 @@ func ReverseProxy(listenPort string, forwardAddr string, passPhrase []byte, test
 	if err != nil {
 		log.Fatal("[SERVER] tcp server listener error:", err)
 	}
-	listenConn, _ := listener.Accept() // accept new connection
-	target, _ := net.Dial("tcp", forwardAddr)
-	log.Printf("[SERVER] accepted: %s\n", listenConn.RemoteAddr().String())
-	log.Printf("[SERVER] org: %s\n", target.LocalAddr().String())
-	log.Printf("[SERVER] dst: %s\n", target.RemoteAddr().String())
+	for {
+		listenConn, _ := listener.Accept() // accept new connection
+		target, _ := net.Dial("tcp", forwardAddr)
+		// log.Printf("[SERVER] accepted: %s\n", listenConn.RemoteAddr().String())
+		// log.Printf("[SERVER] org: %s\n", target.LocalAddr().String())
+		// log.Printf("[SERVER] dst: %s\n", target.RemoteAddr().String())
 
-	defer listenConn.Close()
-	defer target.Close()
+		defer listenConn.Close()
+		defer target.Close()
 
-	closed := make(chan bool, 2)
-	go Relay(listenConn, target, true, passPhrase, test, closed)  // decode data and relay to the dst addr
-	go Relay(target, listenConn, false, passPhrase, test, closed) // encrypt response and return
-	<-closed
+		go Relay(listenConn, target, true, passPhrase, test)  // decode data and relay to the dst addr
+		go Relay(target, listenConn, false, passPhrase, test) // encrypt response and return
+	}
 }
 
-func Relay(from net.Conn, to net.Conn, outbound bool, passPhrase []byte, test bool, closed chan bool) {
-	buffer := make([]byte, bufferSize)
+func Relay(from net.Conn, to net.Conn, outbound bool, passPhrase []byte, test bool) {
 	for {
+		buffer := make([]byte, bufferSize)
 		n1, err := from.Read(buffer)
 		if err != nil {
-			log.Println(err)
-			closed <- true
+			// log.Println(err)
 			return
 		}
-		log.Printf("[SERVER] recv len: %d, from: %s\n", n1, from.RemoteAddr().String())
+		// log.Printf("[SERVER] recv len: %d, from: %s\n", n1, from.RemoteAddr().String())
 		var recv = buffer[:n1]
 		var msg []byte
 
@@ -128,9 +132,8 @@ func Relay(from net.Conn, to net.Conn, outbound bool, passPhrase []byte, test bo
 			if outbound {
 				msg, err = extractMsg(recv, passPhrase) // decrypt messages
 				if err != nil {
-					log.Println(err)
-					log.Println("[SERVER] Verification failed, turn to garbage.")
-					closed <- true
+					// log.Println(err)
+					// log.Println("[SERVER] Verification failed, turn to garbage.")
 					continue
 				}
 			} else {
@@ -138,12 +141,13 @@ func Relay(from net.Conn, to net.Conn, outbound bool, passPhrase []byte, test bo
 			}
 		}
 		n2, err := to.Write(msg)
-		log.Printf("[SERVER] write len: %d, to: %s\n", n2, to.RemoteAddr().String())
+		// log.Printf("[SERVER] write len: %d, to: %s\n", n2, to.RemoteAddr().String())
+		log.Printf("[SERVER] write len: %d, to: %s, msg: %x\n", n2, to.RemoteAddr().String(), msg)
 		if err != nil {
-			log.Println(err)
-			closed <- true
+			// log.Println(err)
 			return
 		}
+		buffer = nil
 	}
 }
 
@@ -159,12 +163,12 @@ func generateMsg(plainText []byte, passphrase []byte) []byte {
 	}
 	cypherText := Encrypt(plainText, passphrase, nonce, salt)
 	generated := bytes.Join([][]byte{nonce, salt, cypherText}, []byte{})
-	log.Printf("generateMsg: %x\n", generated)
+	// log.Printf("generateMsg: %x\n", generated)
 	return generated
 }
 
 func extractMsg(recvMsg []byte, passphrase []byte) ([]byte, error) {
-	log.Printf("extractMsg: %x\n", recvMsg)
+	// log.Printf("extractMsg: %x\n", recvMsg)
 	nonce, salt, cypherText := recvMsg[:12], recvMsg[12:20], recvMsg[20:]
 	plainText, err := Decrypt(cypherText, passphrase, nonce, salt)
 	return plainText, err
@@ -172,9 +176,9 @@ func extractMsg(recvMsg []byte, passphrase []byte) ([]byte, error) {
 
 // Encrypt using AES-256 in GCM mode
 func Encrypt(plainText []byte, passphrase []byte, nonce []byte, salt []byte) []byte {
-	log.Printf("[Encrypt] plainText: %x\n", plainText)
-	log.Printf("[Encrypt] nonce: %x\n", nonce)
-	log.Printf("[Encrypt] salt: %x\n", salt)
+	// log.Printf("[Encrypt] plainText: %x\n", plainText)
+	// log.Printf("[Encrypt] nonce: %x\n", nonce)
+	// log.Printf("[Encrypt] salt: %x\n", salt)
 	key := GenerateKey(passphrase, salt) // AES key was derived from the supplied passphrase using PBKDF2
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -187,17 +191,17 @@ func Encrypt(plainText []byte, passphrase []byte, nonce []byte, salt []byte) []b
 	}
 
 	ciphertext := aesgcm.Seal(nil, nonce, plainText, nil)
-	log.Printf("[Encrypt] AES key: %x\n", key)
-	log.Printf("[Encrypt] cipherText: %x\n", ciphertext)
+	// log.Printf("[Encrypt] AES key: %x\n", key)
+	// log.Printf("[Encrypt] cipherText: %x\n", ciphertext)
 	return ciphertext
 }
 
 func Decrypt(cipherText []byte, passphrase []byte, nonce []byte, salt []byte) ([]byte, error) {
-	log.Printf("[Decrypt] cipherText: %x\n", cipherText)
-	log.Printf("[Decrypt] nonce: %x\n", nonce)
-	log.Printf("[Decrypt] salt: %x\n", salt)
+	// log.Printf("[Decrypt] cipherText: %x\n", cipherText)
+	// log.Printf("[Decrypt] nonce: %x\n", nonce)
+	// log.Printf("[Decrypt] salt: %x\n", salt)
 	key := GenerateKey(passphrase, salt)
-	log.Printf("[Decrypt] AES key: %x\n", key)
+	// log.Printf("[Decrypt] AES key: %x\n", key)
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		panic(err.Error())
@@ -210,10 +214,10 @@ func Decrypt(cipherText []byte, passphrase []byte, nonce []byte, salt []byte) ([
 
 	plainText, err := aesgcm.Open(nil, nonce, cipherText, nil)
 	if err != nil {
-		log.Printf("[Decrypt] error: %s\n", err.Error())
+		// log.Printf("[Decrypt] error: %s\n", err.Error())
 		return nil, err
 	}
-	log.Printf("[Decrypt] plainText: %x\n", plainText)
+	// log.Printf("[Decrypt] plainText: %x\n", plainText)
 	return plainText, nil
 }
 
