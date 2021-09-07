@@ -6,10 +6,9 @@ My implementation:
 - Receive and decrypt message:
     - Start a go routing to read and decrypt message from connection in non-blocking way.
 - Read plaintext traffic from stdin:
-    - Read by line using 'bufio.NewScanner', also adds back '\n'.
     - Encrypt message before sending.
 
-2. Proxy server:
+2. Proxy-server:
 - Listen on tcp port specified by [-l listenport], and wait for the connection.
 - Start(Dial) a tcp connection to [destination]:[port]
 - Relay traffic:
@@ -18,19 +17,33 @@ My implementation:
 
 3. Message:
 - Generate message:
+    - nonce: random bytes of length 20
+    - salt: random bytes of length 8
+    - AES key(len 32): use passphrase in keyfile and salt to produce a key of length 32 in PBKDF2 way
+    - encrypt: use 32-length AES key and nonce to encrypt the message using AES-256 in GCM mode
+    - encapsulate message: combine nonce, salt, and encrypted message together.
 - Extract message:
+    - nonce: first 12 byte
+    - salt: 13-20 byte
+    - encrypted message: rest bytes
+    - AES key(len 32): generate using extracted salt.
+    - decrypt: using the extracted nonce, and re-generated AES key to decrypt the cypher message.
 
 
 My test processes:
 1. Test Encryption and Decryption by running: go test -v. Related file is EncryptDecryption_test.go.
 
-2. Test WITHOUT encryption individually (specify '-testmode' in command line):
-2.1 Client:
-- Bi-directionally communicate with netcat, send and receive message at both side.
-    - Terminal 1: ncat -l -p 3333
-    - Terminal 2: go run pbproxy.go -testmode -p passphrase.txt localhost 3333
+2. Test WITHOUT encryption/decryption individually (specify '-testmode' in command line):
+    2.1 Client:
+    - Bi-directionally communicate with netcat, send and receive message at both side.
+        - Terminal 1: ncat -l -p 3333
+        - Terminal 2(client): go run pbproxy.go -testmode -p passphrase.txt localhost 3333
 
-2.2 Proxy server:
-- Bi-directionally communicate with netcat: ssh successfully, and can deal with multiple commands on Terminal 2.
-    - Terminal 1: go run pbproxy.go -testmode -p passphrase.txt -l 3333 localhost 22
-    - Terminal 2: ssh -o "ProxyCommand ncat localhost 3333" localhost
+    2.2 Proxy-server:
+    - Bi-directionally communicate with netcat: ssh successfully, and can deal with multiple commands on Terminal 2.
+        - Terminal 1(proxy-server): go run pbproxy.go -testmode -p passphrase.txt -l 3333 localhost 22
+        - Terminal 2: ssh -o "ProxyCommand ncat localhost 3333" localhost
+
+3. Integral test:
+- Terminal 1(proxy-server): go run pbproxy.go -p passphrase.txt -l 3333 localhost 22
+- Terminal 2(client): go run pbproxy.go -p passphrase.txt localhost 3333

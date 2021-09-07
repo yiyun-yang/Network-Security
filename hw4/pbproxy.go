@@ -17,6 +17,8 @@ import (
 	"strings"
 )
 
+var bufferSize = 65536
+
 func main() {
 	// Parsing command lines: eg. pbproxy -p mykey -l 2222 localhost 22
 	var keyPath string
@@ -50,7 +52,7 @@ func Client(addr string, passPhrase []byte, test bool) {
 	defer conn.Close()
 	go func() { // receiving message
 		for {
-			buf := make([]byte, 4096)
+			buf := make([]byte, bufferSize)
 			n, err := conn.Read(buf)
 			if err == io.EOF {
 				continue
@@ -70,22 +72,19 @@ func Client(addr string, passPhrase []byte, test bool) {
 			log.Printf("%s", string(msg))
 		}
 	}()
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() { // sending message
-		msg := scanner.Bytes()
-		msg = append(msg, '\n')
-		if !test {
-			msg = generateMsg(msg, passPhrase) // combine user input, nonce and salt together
-		}
-		if len(msg) == 0 {
-			continue
-		}
-		_, err := conn.Write(msg)
-		log.Printf("[CLIENT][SEND] encrypted message: %x\n", msg)
-
-		if err != nil {
-			log.Println(err)
-			continue
+	reader := bufio.NewReader(os.Stdin)
+	buf := make([]byte, bufferSize)
+	for {
+		n1, _ := reader.Read(buf)
+		if test {
+			conn.Write(buf[:n1])
+		} else {
+			msg := generateMsg(buf[:n1], passPhrase) // Encrypt message
+			_, err := conn.Write(msg)
+			log.Printf("[CLIENT][SEND] encrypted message: %x\n", msg)
+			if err != nil {
+				log.Println(err)
+			}
 		}
 	}
 }
@@ -111,8 +110,8 @@ func ReverseProxy(listenPort string, forwardAddr string, passPhrase []byte, test
 }
 
 func Relay(from net.Conn, to net.Conn, outbound bool, passPhrase []byte, test bool, closed chan bool) {
+	buffer := make([]byte, bufferSize)
 	for {
-		buffer := make([]byte, 4096)
 		n1, err := from.Read(buffer)
 		if err != nil {
 			log.Println(err)
