@@ -30,20 +30,21 @@ My implementation:
     - decrypt: using the extracted nonce, and re-generated AES key to decrypt the cypher message.
 
 
-My test processes:
+My test processes():
 1. Test Encryption and Decryption by running: go test -v. Related file is EncryptDecryption_test.go.
 
 2. Test WITHOUT encryption/decryption individually (specify '-testmode' in command line):
     2.1 Client:
     - Bi-directionally communicate with netcat, send and receive message at both side.
-        - Terminal 1: ncat -l -p 3333
+        - Terminal 1: nc -l -p 3333
         - Terminal 2(client): go run pbproxy.go -testmode -p passphrase.txt localhost 3333
 
     2.2 Proxy-server:
     - Bi-directionally communicate with netcat: ssh successfully, and can deal with multiple commands on Terminal 2.
         - Terminal 1(proxy-server): go run pbproxy.go -testmode -p passphrase.txt -l 3333 localhost 22
-        - Terminal 2: ssh -o "ProxyCommand ncat localhost 3333" localhost
+        - Terminal 2: ssh -o "ProxyCommand nc localhost 3333" localhost
 
 3. Integral test:
 - Terminal 1(proxy-server): go run pbproxy.go -p passphrase.txt -l 3333 localhost 22
 - Terminal 2(client): go run pbproxy.go -p passphrase.txt localhost 3333
+However, the result turns out not working as expected.
